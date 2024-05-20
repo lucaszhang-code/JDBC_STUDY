@@ -620,3 +620,204 @@ public class TestLogin0 {
     }
 ```
 
+#### 预处理的应用
+
+```java
+package cn.guet.demo5;
+
+import cn.guet.util.ConnectionUtils;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+
+/**
+ * 使用预处理来实现登录逻辑，验证是否能解决sql注入问题
+ */
+
+public class testLogin {
+    public static void main(String[] args) {
+        String username = "' or 1=1 or ''=''";
+        boolean isok = login(username,"12345");
+        System.out.println(isok);
+    }
+
+    public static boolean login(String username, String password) {
+        // -----------区别1：sql 换成占位符 -----------
+        String sql = "select * from account where accname=? and password=?";
+        Connection conn = ConnectionUtils.getConn();
+
+        try {
+            // --------------区别2：提前去传入sql进行预处理，预编译------------------
+            PreparedStatement pst = conn.prepareStatement(sql);
+            //-------------------区别3：在执行前进行占位符赋值-----------------------
+            pst.setString(1, username);
+            pst.setString(2, password);
+
+            //--------------区别4：执行时，不再传入sql------------------
+            // 执行 返回结果集
+            ResultSet resultSet = pst.executeQuery();
+            if(resultSet.next()) {
+                System.out.println("成功");
+                return true;
+            }
+
+            ConnectionUtils.close(conn,pst,resultSet);
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+
+        return false;
+    }
+}
+
+```
+
+## 银行转账案例
+
+##### 我们使用预处理进行两个用户的转账操作，比如Sam用户向Lucas用户转入500元，他们对应`sql`操作是
+
+```sql
+update account set balance = balance + 500 where accname = "Lucas";
+```
+
+```sql
+update account set balance = balance - 500 where accname = "Sam"
+```
+
+##### 我们可以发现，他们的sql语句很相似，只有`balance`和`accname`不一样，这是使用预处理的前提
+
+##### 所以预处理的代码是
+
+```java
+ String sql = "update account set balance = balance + ? where accname = ?";
+```
+
+```java
+package cn.guet.demo6;
+
+import cn.guet.util.ConnectionUtils;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+
+/**
+ * 本类实现：模拟银行转账业务逻辑
+ * 事务
+ */
+
+public class TestBankTrans {
+    public static void main(String[] args) throws SQLException {
+        String sql = "update account set balance = balance + ? where accname = ?";
+        // 获取链接
+        Connection conn = ConnectionUtils.getConn();
+        // 创建预处理
+        PreparedStatement pst = conn.prepareStatement(sql);
+        // 给占位符赋值
+        pst.setFloat(1, 500);
+        pst.setString(2,"Lucas");
+        //执行
+        int rows = pst.executeUpdate();
+        
+        // 给Sam用户减500
+        pst.setFloat(1,-500);
+        pst.setString(2,"Sam");
+        int  i = pst.executeUpdate();
+
+        System.out.println(rows+"===" + i);
+        ConnectionUtils.close(conn,pst,null);
+    }
+
+}
+```
+
+##### 代码整体上很好理解，我们利用`balance+-金额`实现金额的改变，先让Lucas加500元，再让Sam减500元，并返回数据库改变的列数
+
+##### 从逻辑上当然没什么问题，但是对于多并发的场景如果中途程序出现异常是会造成麻烦的
+
+##### 比如，如图我们在第一个转账操作执行后手动抛出异常，那么`"".substring(12)`下面的代码是不会执行的，但是Lucas的转账操作已经执行了，但Sam的转账操作不会执行，因此程序出现bug
+
+```java
+ pst.setFloat(1, 500);
+        pst.setString(2,"Lucas");
+        //执行
+        int rows = pst.executeUpdate();
+
+        "".substring(12); // 主动抛出异常
+
+        // 给Sam用户减500
+        pst.setFloat(1,-500);
+        pst.setString(2,"Sam");
+        int  i = pst.executeUpdate();
+```
+
+### 解决方法
+
+##### 我们的想法是转账操作要么都完成，要么都不完成，如果只有一方完成了，另一方未完成，需要进行回滚，回到初始状态；这里通过`事务`来解决
+
+#### 事务的四大特性
+
+- 原子性：指事务是数据库的逻辑工作单位，事务中包括的操作要么都做，要么都不做，不可分割。这确保了事务中包含的程序要么全部执行，要么完全不执行，保持了操作的原子性。
+- 一致性：指事务执行的结果必须是使数据库从一个一致性状态变到另一个一致性状态。这保证了事务在完成时，必须使所有的数据保持一致状态，即数据的完整性和一致性得到维护。
+- 隔离性：指并发的事务是互相隔离的，一个事务的执行不能被其他事务干扰。这确保了即使多个事务并发执行，它们之间也是相互独立的，每个事务都有各自完整的数据空间，保证了并发执行的事务之间不能互相干扰。
+- 持久性：指一旦事务提交后，它对数据库中的数据改变就应该是永久的。即使系统或介质发生故障时，已提交事务的更新不会丢失，保证了数据的持久性和稳定性。
+
+##### 我们使用`conn.setAutoCommit(false)`关闭自动提交事务，也就是只有我们允许提交事务时，才会进行数据库的数据更改，当所有的操作都完成后，再通过`conn.commit()`手动提交事务，在下方`catch`语句使用`conn.rollback()`进行数据回滚，如果转账操作发生异常抛出错误，就执行回滚操作
+```java
+package cn.guet.demo6;
+
+import cn.guet.util.ConnectionUtils;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+
+public class TestTransaction {
+    public static void main(String[] args) {
+        String sql = "update account set balance = balance + ? where accname = ?";
+        // 获取链接
+        Connection conn = ConnectionUtils.getConn();
+        PreparedStatement pst = null;
+        try {
+            // 关闭自动提交 手动提交
+            conn.setAutoCommit(false);
+
+            // 创建预处理
+            pst = conn.prepareStatement(sql);
+            // 给占位符赋值
+            pst.setFloat(1, 500);
+            pst.setString(2, "Lucas");
+            //执行
+            int rows = pst.executeUpdate(); // -------不再自动提交事务--------
+
+//            "".substring(12); // 主动抛出异常
+
+            // 给Sam用户减500
+            pst.setFloat(1, -500);
+            pst.setString(2, "Sam");
+            int i = pst.executeUpdate();
+
+            // 提交事务
+            conn.commit(); // --------手动提交事务--------
+
+            System.out.println(rows + "===" + i);
+        }
+        catch (Exception e) {
+            try {
+                // 事务回滚
+                conn.rollback(); // --------事务回滚，恢复到初始状态--------
+            } catch (SQLException ex) {
+                throw new RuntimeException(ex);
+            }
+        }
+        finally {
+            ConnectionUtils.close(conn, pst, null);
+        }
+    }
+}
+
+```
+
