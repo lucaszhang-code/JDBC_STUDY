@@ -821,3 +821,193 @@ public class TestTransaction {
 
 ```
 
+## 批量插入数据
+
+##### 在下面案例中，我们定义了两个函数`test1()`和`test2()`，`test1()`是一次插入单条数据，也就是Java这边一条一条往数据库里插入数据；`test2()`是批量插入数据。我们一次性插入十万条数据，比较两种方式的用时
+
+##### 实验结果是`test1()`用时476226ms，`test2()`用时14939ms。差距十分巨大
+
+##### `test2()`里关闭了自动提交，将原先提交`sql`语句`pst.executeUpdate()`更换成了` pst.addBatch()`,使用` pst.executeBatch()`批量进行sql语句的操作，同时由于所有的数据是先缓存到内存中，如果数据量过大可能会造成内存溢出，解决办法是每6000条数据执行` pst.executeUpdate()`，同时也可以提交事务
+
+```java
+package cn.guet.demo7;
+
+import cn.guet.util.ConnectionUtils;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+
+public class TestBatch01 {
+    public static void main(String[] args) {
+        long startTime = System.currentTimeMillis(); // 开始时间
+
+        test2(100000);
+
+        long endTime = System.currentTimeMillis(); // 结束时间
+
+        System.out.println("耗时：" + (endTime - startTime) + "ms");
+    }
+
+    /**
+     * count：插入的记录数
+     * 普通的单条插入
+     * 10万条数据插入耗时：476226ms
+     */
+
+    public static void test1(int count) {
+        String sql = "insert into account(accname, password, balance, state, accdate) values(?,?,?,?,now())";
+        Connection conn = ConnectionUtils.getConn();
+        PreparedStatement pst = null;
+
+        try {
+            pst = conn.prepareStatement(sql);
+            for (int i = 1; i <= count; i++) {
+                pst.setString(1, i + "name");
+                pst.setString(2, i + "pwd");
+                pst.setFloat(3, 1000);
+                pst.setInt(4, 1);
+
+                //执行
+                pst.executeUpdate();
+            }
+
+        }
+        catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+        finally {
+            ConnectionUtils.close(conn, pst, null);
+        }
+    }
+
+    /**
+     * count：插入的记录数
+     * 使用批量插入
+     * 10万条数据插入耗时：14939ms
+     *
+     * 注意：内存溢出问题
+     */
+
+    public static void test2(int count) {
+        String sql = "insert into account(accname, password, balance, state, accdate) values(?,?,?,?,now())";
+        Connection conn = ConnectionUtils.getConn();
+        PreparedStatement pst = null;
+
+        try {
+            // 1.先关闭自动提交
+            conn.setAutoCommit(false);
+
+
+            pst = conn.prepareStatement(sql);
+            for (int i = 1; i <= count; i++) {
+                pst.setString(1, i + "name");
+                pst.setString(2, i + "pwd");
+                pst.setFloat(3, 1000);
+                pst.setInt(4, 1);
+
+                //执行
+//                pst.executeUpdate();
+                pst.addBatch(); // 2.把要添加的记录先放入缓存
+
+                if((i + 1) % 6000 == 0){ // 每6000次 执行一次
+                    pst.executeBatch();
+                    conn.commit(); // 避免内存溢出
+                }
+            }
+
+            // 3.批量的执行
+            pst.executeBatch();
+
+
+            // 4.提交事务
+            conn.commit();
+
+        }
+        catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+        finally {
+            ConnectionUtils.close(conn, pst, null);
+        }
+    }
+}
+
+```
+
+## 配置资源文件
+
+##### 在真实的业务场景中，我们可能会频繁修改数据库的连接参数，比如修改用户名或密码，这时候在Java文件中修改并不方便，更坏的是甚至还不一定能修改，所以我们将这些参数整合为资源配置文件
+
+##### 在Src文件夹中右键新建“文件”，命名为`db.properties`,在文件中添加连接数据库的必要参数
+
+```
+url = jdbc:mysql://localhost:3306/bank
+driver = com.mysql.cj.jdbc.Driver
+user = root
+password = 123456
+```
+##### 此时原来ConnectionUtils我们的静态成员变量就可以替换为配置文件的内容
+
+```java
+    private static String user = "rootxx";
+    private static String password = "123456xx";
+    private static String driver = "com.mysql.cj.jdbc.Driverxx";
+    private static String url = "jdbc:mysql://localhost:3306/bankxx";
+
+	// static函数只会执行一次，我们在整个程序中执行一次就可以了
+    static {
+        InputStream is = ConnectionUtils.class.getResourceAsStream("/db.properties");
+        Properties prop = new Properties();
+        try {
+            prop.load(is);
+            System.out.println(">>>>>>" + is);
+            user = prop.getProperty("user");
+            password = prop.getProperty("password");
+            driver = prop.getProperty("driver");
+            url = prop.getProperty("url");
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+```
+
+##### 连接性测试
+
+```java
+package cn.guet.demo8;
+
+import cn.guet.util.ConnectionUtils;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
+/**
+ * 通过读取配置文件获取JDBC参数
+ *1.配置资源文件 db.properties
+ * 2.加载配置文件，读取配置信息
+ *
+ * 注意：修改的是ConnectionUtils
+ */
+
+public class TestProperties {
+    public static void main(String[] args) {
+        // try-with-resources 自动在finally中关闭
+        try(
+               	Connection conn = ConnectionUtils.getConn();
+                PreparedStatement ps = conn.prepareStatement("select * from account");
+        ){
+            ResultSet rs = ps.executeQuery();
+            if(rs.next()){
+                System.out.println("读取成功");
+            }
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+}
+
+```
+

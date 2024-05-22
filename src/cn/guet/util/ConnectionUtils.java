@@ -1,15 +1,35 @@
 package cn.guet.util;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
 import java.sql.*;
+import java.util.Properties;
 
 /**
  * 专门用于创建链接和关闭链接
  */
 
 public class ConnectionUtils {
-    private static String user = "root";
-    private static String password = "123456";
-    private static String driver = "com.mysql.cj.jdbc.Driver";
-    private static String url = "jdbc:mysql://localhost:3306/bank";
+    private static String user = "rootxx";
+    private static String password = "123456xx";
+    private static String driver = "com.mysql.cj.jdbc.Driverxx";
+    private static String url = "jdbc:mysql://localhost:3306/bankxx";
+
+    static {
+        InputStream is = ConnectionUtils.class.getResourceAsStream("/db.properties");
+        Properties prop = new Properties();
+        try {
+            prop.load(is);
+            System.out.println(">>>>>>" + is);
+            user = prop.getProperty("user");
+            password = prop.getProperty("password");
+            driver = prop.getProperty("driver");
+            url = prop.getProperty("url");
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     /**
      * 获取连接对象
