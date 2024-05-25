@@ -1011,3 +1011,231 @@ public class TestProperties {
 
 ```
 
+## 存储过程
+
+### 调用无参存储过程
+
+##### 对应sql代码,这段代码是创建一个新表`account_backup`，并把`account`表所有的数据拷贝给新表
+
+```sql
+create procedure create_back()
+begin
+    drop table if exists account_backup;
+    create table account_backup select * from account;
+end;
+
+-- 调用存储过程
+call create_back;
+```
+
+##### 我们使用`CallableStatement`来处理存储过程，使用`executeUpdate`调用
+
+```java
+    public static void callNoParamProcedure() {
+       try(Connection conn = ConnectionUtils.getConn()){
+           // 创建可以执行存储过程的声明对象
+           CallableStatement cs = conn.prepareCall("call create_back");
+           // 执行
+           int i = cs.executeUpdate();
+
+           System.out.println(i);
+       }
+        catch(Exception e){
+           e.printStackTrace();
+        }
+    }
+```
+
+### 调用有参存储过程
+
+##### sql代码,这是之前转账的案例，这里我们传入`money`,`fromAcc`,`toAcc`三个参数，并且开启事务
+
+```sql
+-- 修改表 添加检查约束 余额不能为负数
+alter table account add constraint ck_balance check ( balance > 0 );
+
+-- 存储过程 转账多次 当余额小于0时，会触发检查约束，异常
+drop procedure if exists transfer;
+create procedure transfer(money float, fromAcc int, toAcc int)
+begin
+    # 开启事务
+    start transaction ;
+    update account set balance = balance + money where accid = toAcc;
+    update account set balance = balance - money where accid = fromAcc;
+
+    # 提交事务
+    commit ;
+end;
+
+-- 调用存储过程
+call transfer(500,1,2);
+```
+
+##### 调用方法也很简单,利用？占位符，后面传参就可以了
+
+```java
+    public static void paramProcedure() {
+        try(Connection conn = ConnectionUtils.getConn()){
+            CallableStatement cs = conn.prepareCall("call transfer(?,?,?)");
+            cs.setFloat(1,500);
+            cs.setInt(2,1);
+            cs.setInt(3,2);
+            int i = cs.executeUpdate();
+            System.out.println(i);
+        }
+        catch(Exception e){
+            e.printStackTrace();
+        }
+    }
+```
+
+![结果](./assets/有参调用过程结果1.png)
+
+##### 以上代码如果你去运行，你会发现终端输出的是0，这并不代表调用没成功，因为mysql那边返回的结果就是0，但是我们想返回正确的更新行数该怎么办？
+
+### 存储过程返回结果
+
+##### 对应sql语句,还是之前那个转账的存储过程，我们这次传入四个参数，多了一个返回的参数`res`,我们声明`affect_rows`变量，用于获取每一次转账操作变化的行数，`select row_count() into affect_rows; -- 获取影响行数`,并进行累加操作
+
+```sql
+create procedure transferOutParam(money float, fromAcc int, toAcc int, out res int)
+begin
+    declare affect_rows int default 0; -- 声明语句必须放在语句前面
+    set res = 0;
+
+    # 开启事务
+    start transaction ;
+    update account set balance = balance + money where accid = toAcc;
+    select row_count() into affect_rows; -- 获取影响行数
+    set res = res + affect_rows; -- 累计影响的行数
+
+    update account set balance = balance - money where accid = fromAcc;
+    select row_count() into affect_rows;
+    set res = res + affect_rows;  -- 累计最近更新的行数
+
+    # 提交事务
+    commit ;
+end;
+
+-- 调用out参数的过程
+call transferOutParam(500,2,1,@res);
+select @res;
+```
+
+##### 我们使用getInt接收存储过程返回的参数,使用`registerOutParameter`注册out出参
+
+```java
+    public static void paramsInOutProcedure() {
+        try(Connection conn = ConnectionUtils.getConn()){
+            CallableStatement cs = conn.prepareCall("call transferOutParam(?,?,?,?)");
+            cs.setFloat(1,500);
+            cs.setInt(2,2);
+            cs.setInt(3,1);
+            // 注册out出参
+            cs.registerOutParameter(4, Types.INTEGER);
+
+            cs.executeUpdate();
+
+            // 获取out参数结果
+            int anInt = cs.getInt(4);
+
+            System.out.println(anInt);
+        }
+        catch(Exception e){
+            e.printStackTrace();
+        }
+    }
+```
+
+##### 这下能正确返回影响的行数
+
+### 存储过程里使用select语句返回结果
+
+##### 对应sql语句,输入用户id，返回他的id，姓名，余额信息
+
+```sql
+create procedure getInfo(aid int)
+begin
+    select accid, accname, balance from account where accid = aid;
+end;
+
+call getInfo(1);
+```
+
+##### 其实用正常的获取select结果的方式就可以了，注意，这里调用存储过程用的是`executeQuery`
+
+```java
+public static void paramsGetResult() {
+    try(Connection conn = ConnectionUtils.getConn()){
+        CallableStatement cs = conn.prepareCall("call getInfo(?)");
+        cs.setInt(1, 1);
+
+        // 执行查询，返回结果集
+        ResultSet resultSet = cs.executeQuery();
+        if(resultSet.next()) {
+            int accid = resultSet.getInt(1);
+            String accname = resultSet.getString(2);
+            float balance = resultSet.getFloat(3);
+            System.out.println(accid + " " + accname + " " + balance);
+        }
+    }
+    catch(SQLException e){
+        e.printStackTrace();
+    }
+}
+```
+
+![结果](./assets/有参存储过程结果2.png)
+
+## 结果集
+
+##### 以往我们都知道一张表的表头字段名是什么，也知道他的字段类型，但是倘若我们不知道这些，如何通过返回的`resultSet`得知这些信息？
+
+##### 以往我们获取结果都是使用ResultSet类，要知道他的元数据，我们使用`ResultSetMetaData`类，使用`getMetaData`方法，从结果集中得到元数据
+
+##### `getColumnCount`会返回得到元数据的列数，可以使用for循环依次得到结果，注意下标从1开始
+
+##### `getColumnName`获取他的字段名，`getColumnType`获取他的字段名的数据类型（注意，他返回的是编号，需要你去查），`getColumnLabel`获取字段名取的别名（如果有），`getTableName`获取表的名字
+
+```java
+public class TestResultSet {
+    public static void main(String[] args) {
+        String sql = "select accid,accname name,password from account";
+        query(sql);
+    }
+
+    public static void query(String sql){
+        Connection conn = ConnectionUtils.getConn();
+        PreparedStatement ps = null;
+        ResultSet rs = null;
+        try {
+            ps = conn.prepareStatement(sql);
+            rs = ps.executeQuery();
+           // 获取元数据对象
+            ResultSetMetaData metaData = rs.getMetaData();
+            // 获取列数
+            int columnCount = metaData.getColumnCount();
+            System.out.println(columnCount);
+
+            for (int i = 1; i <= columnCount; i++) {
+                String columnName = metaData.getColumnName(i); // 从一开始的
+//                int columnType = metaData.getColumnType(i);
+                String labelName = metaData.getColumnLabel(i);
+                System.out.println(columnName + " " + labelName);
+            }
+
+            // 获取表的名字
+            String tableName = metaData.getTableName(1);
+            System.out.println("表名：" + tableName);
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+        finally {
+            ConnectionUtils.close(conn,ps,rs);
+        }
+
+    }
+}
+```
+
