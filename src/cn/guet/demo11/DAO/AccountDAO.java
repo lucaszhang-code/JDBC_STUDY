@@ -44,8 +44,10 @@ public class AccountDAO extends BaseDao {
 
     public List<Account> queryAll(){
         String sql = "select * from account";
-        return super.query(sql,Account.class);
+//        return super.query(sql,Account.class);
+        return null;
     }
+
 
 
     public List<Account> queryAllxx(){
